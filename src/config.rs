@@ -13,7 +13,8 @@ use bgzip::read::{BGZFReader, IndexedBGZFReader};
 use flate2::read::MultiGzDecoder;
 
 use crate::read::{self, ReverseRead};
-use crate::select::{SelectColumns, Selectable, Selection};
+use crate::record::Record;
+use crate::select::{SelectColumns, Selection};
 use crate::{CliError, CliResult};
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -217,7 +218,7 @@ impl Config {
         self.path.is_none()
     }
 
-    pub fn selection<S: Selectable>(&self, first_record: &S) -> Result<Selection, String> {
+    pub fn selection<R: Record>(&self, first_record: &R) -> Result<Selection, String> {
         match self.select_columns {
             None => Err("Config has no 'SelectColums'. Did you call \
                          Config::select?"
@@ -338,9 +339,9 @@ impl Config {
         select: &Option<SelectColumns>,
     ) -> CliResult<Box<dyn Iterator<Item = CliResult<String>>>> {
         if let Some(sel) = select {
-            let mut csv_reader = self.reader()?;
-            let headers = csv_reader.byte_headers()?;
-            let column_index = sel.single_selection(headers, !self.no_headers)?;
+            let mut csv_reader = self.simd_reader()?;
+            let headers = csv_reader.peek_byte_record(true)?;
+            let column_index = sel.single_selection(&headers, !self.no_headers)?;
 
             return Ok(Box::new(csv_reader.into_byte_records().map(
                 move |result| match result {
@@ -378,13 +379,13 @@ impl Config {
         select: (&Option<SelectColumns>, &Option<SelectColumns>),
     ) -> CliResult<Box<dyn Iterator<Item = PairResult>>> {
         if let Some(first_sel) = &select.0 {
-            let mut csv_reader = self.reader()?;
-            let headers = csv_reader.byte_headers()?;
-            let first_column_index = first_sel.single_selection(headers, !self.no_headers)?;
+            let mut csv_reader = self.simd_reader()?;
+            let headers = csv_reader.peek_byte_record(true)?;
+            let first_column_index = first_sel.single_selection(&headers, !self.no_headers)?;
             let second_column_index_opt = select
                 .1
                 .as_ref()
-                .map(|sel| sel.single_selection(headers, !self.no_headers))
+                .map(|sel| sel.single_selection(&headers, !self.no_headers))
                 .transpose()?;
 
             return Ok(Box::new(csv_reader.into_byte_records().map(
@@ -476,15 +477,16 @@ impl Config {
         }
     }
 
-    pub fn io_reader_at_position(
+    pub fn io_reader_at_position_with_limit(
         &self,
         position: u64,
+        limit: u64,
     ) -> CliResult<Box<dyn Read + Send + 'static>> {
         let mut reader = self.io_reader_for_random_access()?;
 
         reader.seek(SeekFrom::Start(position))?;
 
-        Ok(Box::new(reader))
+        Ok(Box::new(reader.take(limit)))
     }
 
     pub fn reverse_reader(
